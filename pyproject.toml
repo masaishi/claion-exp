@@ -31,6 +31,7 @@ dev = [
     "pyright>=1.1.394",
     "invoke>=2.2.0",
     "ipykernel>=6.29.5",
+    "wandb>=0.19.8",
 ]
 notebooks = [
     "ipykernel>=6.29.5",
