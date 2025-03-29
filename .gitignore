@@ -12,4 +12,7 @@ wheels/
 .coverage*
 coverage.*
 
+.env
+
 /data
+/wandb
