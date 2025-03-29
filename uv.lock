@@ -332,6 +332,7 @@ dependencies = [
     { name = "torch" },
     { name = "torchaudio" },
     { name = "transformers" },
+    { name = "wandb" },
 ]
 
 [package.dev-dependencies]
@@ -343,7 +344,6 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
-    { name = "wandb" },
 ]
 notebooks = [
     { name = "ipykernel" },
@@ -368,6 +368,7 @@ requires-dist = [
     { name = "torch", specifier = ">=2.6.0" },
     { name = "torchaudio", specifier = ">=2.6.0" },
     { name = "transformers", specifier = ">=4.49.0" },
+    { name = "wandb", specifier = ">=0.19.8" },
 ]
 
 [package.metadata.requires-dev]
@@ -379,7 +380,6 @@ dev = [
     { name = "pytest", specifier = ">=8.3.4" },
     { name = "pytest-cov", specifier = ">=6.0.0" },
     { name = "ruff", specifier = ">=0.9.6" },
-    { name = "wandb", specifier = ">=0.19.8" },
 ]
 notebooks = [
     { name = "ipykernel", specifier = ">=6.29.5" },
