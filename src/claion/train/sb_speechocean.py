@@ -1,3 +1,4 @@
+import gc
 import glob
 import logging
 import os
@@ -12,6 +13,7 @@ from tqdm import tqdm
 
 import wandb
 from claion.core.accent_evaluator import AccentEvaluator, EvaluatorConfig
+from claion.data.utils import get_root_path
 from claion.pipes.sb_sts import SpeechBrainSTSPipeline
 
 # Configure logging
@@ -19,10 +21,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-class STSTrainer:
+class AccentTrainer:
     """
     Trainer for SpeechBrainSTSPipeline to maximize English accent scores.
-    This implementation properly handles the pipeline initialization and memory management.
+
+    Key improvements:
+    1. Uses a single SpeechBrainSTSPipeline instance with proper memory management
+    2. Supresses unnecessary warnings
+    3. Ensures models are downloaded only once and cached properly
+    4. Implements proper error recovery
     """
 
     def __init__(
@@ -33,18 +40,18 @@ class STSTrainer:
         evaluator_model="openai/whisper-base",
         device=None,
         use_wandb=True,
-        project_name="sts-accent-training",
+        project_name="accent-maximization",
     ):
-        """Initialize the STS Trainer."""
+        """Initialize the Accent Trainer."""
         # Set up device
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Using device: {self.device}")
 
-        # Set up directories
-        root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.data_dir = data_dir if data_dir else os.path.join(root_path, "data/speechocean762/train/audios")
-        self.output_dir = output_dir if output_dir else os.path.join(root_path, "data/outputs")
-        self.cache_dir = cache_dir if cache_dir else os.path.join(root_path, "data/cache")
+        # Set up directories using get_root_path
+        root_path = get_root_path()
+        self.data_dir = data_dir if data_dir else str(root_path / "data" / "speechocean762" / "train" / "audios")
+        self.output_dir = output_dir if output_dir else str(root_path / "data" / "outputs")
+        self.cache_dir = cache_dir if cache_dir else str(root_path / "data" / "cache")
 
         # Create directories if they don't exist
         os.makedirs(self.output_dir, exist_ok=True)
@@ -54,8 +61,9 @@ class STSTrainer:
         self.evaluator_model = evaluator_model
         self.evaluator = self._initialize_evaluator()
 
-        # Initialize STS pipeline (will be reinitialized for each file to prevent memory leaks)
-        self.sts_pipeline = None
+        # Initialize STS pipeline once and reuse it
+        logger.info("Initializing SpeechBrainSTSPipeline...")
+        self.sts_pipeline = SpeechBrainSTSPipeline(device=self.device)
 
         # Initialize W&B
         self.use_wandb = use_wandb
@@ -65,13 +73,12 @@ class STSTrainer:
 
     def _setup_wandb(self):
         """Set up Weights & Biases logging."""
-        # Load environment variables and login to wandb
         load_dotenv()
         api_key = os.getenv("WANDB_API_KEY")
         if api_key:
             wandb.login(key=api_key)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_name = f"sts_training_{timestamp}"
+            run_name = f"accent_training_{timestamp}"
             wandb.init(project=self.project_name, name=run_name)
         else:
             logger.warning("WANDB_API_KEY not found in environment variables. W&B logging disabled.")
@@ -79,17 +86,15 @@ class STSTrainer:
 
     def _initialize_evaluator(self):
         """Initialize the accent evaluator."""
+        logger.info(f"Initializing Accent Evaluator with model: {self.evaluator_model}")
         eval_config = EvaluatorConfig(model_path=self.evaluator_model, device=self.device)
         return AccentEvaluator(eval_config)
 
-    def _initialize_pipeline(self):
-        """Initialize or reinitialize the STS pipeline."""
-        # Free CUDA memory if available
+    def _cleanup_memory(self):
+        """Clean up GPU memory."""
         if torch.cuda.is_available():
+            gc.collect()
             torch.cuda.empty_cache()
-
-        # Initialize fresh pipeline
-        return SpeechBrainSTSPipeline(device=self.device)
 
     def process_file(self, audio_path, epoch):
         """
@@ -104,21 +109,18 @@ class STSTrainer:
         """
         file_name = os.path.splitext(os.path.basename(audio_path))[0]
 
-        # Initialize a fresh pipeline for each file to prevent memory leaks
-        if self.sts_pipeline is None or epoch == 0:
-            self.sts_pipeline = self._initialize_pipeline()
-
         # Determine input path based on epoch
         if epoch == 0:
             # First epoch uses original audio
             input_path = Path(audio_path)
         else:
             # Subsequent epochs use output from previous epoch
-            prev_cache_path = os.path.join(self.cache_dir, f"{file_name}_epoch{epoch - 1}.wav")
+            prev_cache_path = str(Path(self.cache_dir) / f"{file_name}_epoch{epoch - 1}.wav")
             input_path = Path(prev_cache_path)
 
-        # Evaluate input audio
+        # Process the file with error handling
         try:
+            # Evaluate input audio
             input_result = self.evaluator(str(input_path), transcribe_audio=True)
             input_en_score = input_result.accents.get("English", 0.0)
 
@@ -130,7 +132,7 @@ class STSTrainer:
                 corrected_audio = corrected_audio.squeeze(0)
 
             # Save to cache for this epoch
-            cache_path = os.path.join(self.cache_dir, f"{file_name}_epoch{epoch}.wav")
+            cache_path = str(Path(self.cache_dir) / f"{file_name}_epoch{epoch}.wav")
             torchaudio.save(
                 cache_path,
                 corrected_audio,
@@ -143,8 +145,9 @@ class STSTrainer:
 
             # Reset the model to free up memory
             self.sts_pipeline.reset_model()
+            self._cleanup_memory()
 
-            # Save results
+            # Return results
             return {
                 "file_name": file_name,
                 "epoch": epoch,
@@ -156,12 +159,12 @@ class STSTrainer:
                 "input_accents": input_result.accents,
                 "corrected_accents": corrected_result.accents,
             }
+
         except Exception as e:
             logger.error(f"Error processing {file_name} at epoch {epoch}: {e}")
-            # Clean up and reinitialize pipeline after error
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            self.sts_pipeline = self._initialize_pipeline()
+            # Clean up and reset pipeline after error
+            self._cleanup_memory()
+            self.sts_pipeline.reset_model()
             return None
 
     def train(self, epochs=5, max_files=None, file_pattern="*.wav"):
@@ -178,7 +181,7 @@ class STSTrainer:
             dict: Training results with per-epoch statistics
         """
         # Get all audio files
-        audio_files = glob.glob(os.path.join(self.data_dir, file_pattern))
+        audio_files = glob.glob(str(Path(self.data_dir) / file_pattern))
 
         # Limit number of files if specified
         if max_files:
@@ -192,9 +195,6 @@ class STSTrainer:
         # Training loop
         for epoch in range(epochs):
             logger.info(f"Starting Epoch {epoch + 1}/{epochs}")
-
-            # Initialize a fresh pipeline for this epoch
-            self.sts_pipeline = self._initialize_pipeline()
 
             # Process each file
             epoch_results = []
@@ -234,10 +234,6 @@ class STSTrainer:
                             }
                         )
 
-                # Memory management - force garbage collection periodically
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
             # Calculate epoch statistics
             if epoch_results:
                 avg_input_score = np.mean([r["input_en_score"] for r in epoch_results])
@@ -266,17 +262,14 @@ class STSTrainer:
                     )
 
             # Clean up at the end of each epoch
-            del self.sts_pipeline
-            self.sts_pipeline = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            self._cleanup_memory()
 
         # Save final outputs (best version for each file)
         logger.info("Saving final corrected audio files...")
         for file_name, stats in all_results["file_stats"].items():
             best_epoch = stats["best_epoch"]
-            best_cache_path = os.path.join(self.cache_dir, f"{file_name}_epoch{best_epoch}.wav")
-            output_path = os.path.join(self.output_dir, f"{file_name}_corrected.wav")
+            best_cache_path = str(Path(self.cache_dir) / f"{file_name}_epoch{best_epoch}.wav")
+            output_path = str(Path(self.output_dir) / f"{file_name}_corrected.wav")
 
             # Copy best version to output dir
             try:
@@ -312,12 +305,15 @@ class STSTrainer:
         return all_results
 
 
-def train_sb_sts_pipeline():
+def main():
     """
-    Function to train the SpeechBrainSTSPipeline on all .wav files for 5 epochs.
+    Main function to train the SpeechBrainSTSPipeline on all .wav files for 5 epochs.
     """
+    # Load environment variables for wandb
+    load_dotenv()
+
     # Setup trainer
-    trainer = STSTrainer(use_wandb=True, project_name="sts-accent-maximization")
+    trainer = AccentTrainer(use_wandb=True, project_name="accent-maximization")
 
     # Run the training for 5 epochs on all .wav files
     results = trainer.train(epochs=5)
@@ -342,4 +338,4 @@ def train_sb_sts_pipeline():
 
 
 if __name__ == "__main__":
-    train_sb_sts_pipeline()
+    main()
