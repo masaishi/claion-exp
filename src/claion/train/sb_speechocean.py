@@ -13,7 +13,9 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 import wandb
+from claion.core.accent_evaluator import AccentEvaluator, EvaluatorConfig
 from claion.data.utils import get_root_path
+from claion.pipes.sb_sts import SpeechBrainSTSPipeline
 
 # Configure logger
 logging.basicConfig(level=logging.INFO)
@@ -104,25 +106,74 @@ class AccentTrainer:
         self.config = config
 
         # Initialize accent evaluator
-        from claion.core.accent_evaluator import AccentEvaluator, EvaluatorConfig
-
         evaluator_config = EvaluatorConfig(model_path=self.config.evaluator_model, device=self.config.device)
         self.evaluator = AccentEvaluator(evaluator_config)
 
         # Initialize STS pipeline
-        from claion.pipes.sb_sts import SpeechBrainSTSPipeline
-
+        logger.info("Initializing SpeechBrainSTSPipeline. Ignore warnings about uninitialized weights.")
         self.sts_pipeline = SpeechBrainSTSPipeline(device=self.config.device)
 
-        # Initialize optimizer
-        self.optimizer = torch.optim.Adam(self.sts_pipeline.model.parameters(), lr=self.config.learning_rate)
+        # Freeze model parts and get trainable parameters
+        trainable_params = self._freeze_model_except_decoder()
 
-        # Enable gradient computation for the STS model
-        for param in self.sts_pipeline.model.parameters():
-            param.requires_grad = True
+        # Initialize optimizer with only the trainable parameters
+        logger.info(f"Number of parameter groups for optimizer: {len(trainable_params)}")
+
+        self.optimizer = torch.optim.Adam(trainable_params, lr=self.config.learning_rate)
+
+        logger.info(f"Model and optimizer initialized on device: {self.config.device}")
 
         # Setup wandb logging
         self._setup_wandb()
+
+    def _freeze_model_except_decoder(self):
+        """Freeze all model parameters except the speech decoder postnet."""
+        trainable_params = []
+        if hasattr(self.sts_pipeline.model, "speecht5") and hasattr(self.sts_pipeline.model.speecht5, "encoder"):
+            for param in self.sts_pipeline.model.speecht5.encoder.parameters():
+                param.requires_grad = False
+
+        if (
+            hasattr(self.sts_pipeline.model, "speecht5")
+            and hasattr(self.sts_pipeline.model.speecht5, "decoder")
+            and hasattr(self.sts_pipeline.model.speecht5.decoder, "prenet")
+        ):
+            for param in self.sts_pipeline.model.speecht5.decoder.prenet.parameters():
+                param.requires_grad = False
+
+        # Prepare the trainable parameters list
+        if hasattr(self.sts_pipeline.model, "speech_decoder_postnet"):
+            for param in self.sts_pipeline.model.speech_decoder_postnet.parameters():
+                param.requires_grad = True
+                trainable_params.append(param)
+
+        # Log the freezing status
+        total_params = 0
+        trainable_param_count = 0
+        trainable_names = []
+
+        for name, param in self.sts_pipeline.model.named_parameters():
+            total_params += param.numel()
+            if param.requires_grad:
+                trainable_param_count += param.numel()
+                if "speech_decoder_postnet" in name:
+                    trainable_names.append(name)
+                else:
+                    # Unintended trainable parameters - still count them but we won't train them
+                    param.requires_grad = False
+
+        # Only list a sample of the trainable parameters to avoid flooding the logs
+        logger.info("Speech decoder postnet trainable parameters (sample):")
+        for name in trainable_names[:10]:  # Show first 10 only
+            logger.info(f"  TRAINABLE: {name}")
+        if len(trainable_names) > 10:
+            logger.info(f"  ... and {len(trainable_names) - 10} more")
+
+        # Update our count after adjustments
+        trainable_param_count = sum(p.numel() for p in self.sts_pipeline.model.parameters() if p.requires_grad)
+        logger.info(f"Trainable parameters: {trainable_param_count:,} / {total_params:,} " + f"({trainable_param_count / total_params:.2%})")
+
+        return [p for p in self.sts_pipeline.model.speech_decoder_postnet.parameters()]
 
     def _setup_wandb(self):
         """Set up Weights & Biases logging."""
@@ -187,86 +238,134 @@ class AccentTrainer:
             input_path = Path(audio_path)
         else:
             input_path = Path(self.config.cache_dir) / f"{file_name}_epoch{epoch - 1}.wav"
+            if not input_path.exists():
+                logger.error(f"Input file does not exist: {input_path}")
+                return None
 
+        # try:
+        # Evaluate input audio
+        input_result = self.evaluator(str(input_path), transcribe_audio=True)
+
+        # Ensure accents dictionary exists and has expected structure
+        if not hasattr(input_result, "accents") or input_result.accents is None:
+            logger.error(f"Input result has no accents attribute for file {file_name}")
+            return None
+
+        input_en_score = input_result.accents.get("English", 0.0)
+
+        # Ensure transcript exists
+        input_transcript = getattr(input_result, "transcript", "")
+        if input_transcript is None:
+            input_transcript = ""
+
+        # Set model mode
+        if train_mode:
+            self.sts_pipeline.model.train()
+            self.optimizer.zero_grad()
+        else:
+            self.sts_pipeline.model.eval()
+
+        corrected_audio = self.sts_pipeline.generate_speech(input_path)
+
+        # Ensure we got valid audio
+        if corrected_audio is None or (isinstance(corrected_audio, tuple) and len(corrected_audio) == 0):
+            logger.error(f"STS pipeline returned None or empty audio for file {file_name}")
+            return None
+
+        # Handle if corrected_audio is a tuple (audio, sample_rate)
+        if isinstance(corrected_audio, tuple):
+            if len(corrected_audio) < 1:
+                logger.error(f"STS pipeline returned empty tuple for file {file_name}")
+                return None
+            corrected_audio = corrected_audio[0]
+
+        # Ensure audio has correct dimensions
+        if corrected_audio.ndim > 1 and corrected_audio.shape[0] == 1:
+            corrected_audio = corrected_audio.squeeze(0)
+
+        # Save to cache
+        cache_path = str(Path(self.config.cache_dir) / f"{file_name}_epoch{epoch}.wav")
         try:
-            # Evaluate input audio
-            input_result = self.evaluator(str(input_path), transcribe_audio=True)
-            input_en_score = input_result.accents.get("English", 0.0)
+            # Ensure tensor is detached and on CPU
+            audio_to_save = corrected_audio.detach().cpu() if torch.is_tensor(corrected_audio) else corrected_audio
+            torchaudio.save(cache_path, audio_to_save, sample_rate=self.sts_pipeline.sampling_rate)
+        except Exception as e:
+            logger.error(f"Failed to save audio file {cache_path}: {e}")
+            return None
 
-            # Set model mode
-            if train_mode:
-                self.sts_pipeline.model.train()
-                self.optimizer.zero_grad()
-            else:
-                self.sts_pipeline.model.eval()
+        # Evaluate corrected audio
+        corrected_result = self.evaluator(cache_path, transcribe_audio=True)
 
-            # Process with STS pipeline
-            corrected_audio = self.sts_pipeline.generate_speech(input_path)
+        # Ensure accents dictionary exists for corrected audio
+        if not hasattr(corrected_result, "accents") or corrected_result.accents is None:
+            logger.error(f"Corrected result has no accents attribute for file {file_name}")
+            return None
 
-            # Ensure audio has correct dimensions
-            if corrected_audio.ndim > 1 and corrected_audio.shape[0] == 1:
-                corrected_audio = corrected_audio.squeeze(0)
+        corrected_en_score = corrected_result.accents.get("English", 0.0)
 
-            # Save to cache
-            cache_path = str(Path(self.config.cache_dir) / f"{file_name}_epoch{epoch}.wav")
-            torchaudio.save(cache_path, corrected_audio, sample_rate=self.sts_pipeline.sampling_rate)
+        # Ensure transcript exists for corrected audio
+        corrected_transcript = getattr(corrected_result, "transcript", "")
+        if corrected_transcript is None:
+            corrected_transcript = ""
 
-            # Evaluate corrected audio
-            corrected_result = self.evaluator(cache_path, transcribe_audio=True)
-            corrected_en_score = corrected_result.accents.get("English", 0.0)
+        # Calculate improvement
+        improvement = corrected_en_score - input_en_score
 
-            # Calculate improvement
-            improvement = corrected_en_score - input_en_score
+        if train_mode:
+            # Maximize English score by minimizing negative improvement
+            loss = -improvement
+            loss_tensor = torch.tensor(loss, device=self.config.device, requires_grad=True)
 
-            if train_mode:
-                # Maximize English score by minimizing negative improvement
-                loss = -improvement
-                loss_tensor = torch.tensor(loss, device=self.config.device, requires_grad=True)
+            # Only do backward pass if we have trainable parameters
+            trainable_params = any(p.requires_grad for p in self.sts_pipeline.model.parameters())
+            if trainable_params:
                 loss_tensor.backward()
 
                 # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(self.sts_pipeline.model.parameters(), self.config.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_([p for p in self.sts_pipeline.model.parameters() if p.requires_grad], self.config.max_grad_norm)
 
                 # Update model parameters
                 self.optimizer.step()
+            else:
+                logger.warning("No trainable parameters found. Skipping backward pass.")
 
-                # Log to wandb
-                wandb.log(
-                    {
-                        "loss": loss.item(),
-                        "file_name": file_name,
-                        "epoch": epoch,
-                        "input_en_score": input_en_score,
-                        "corrected_en_score": corrected_en_score,
-                        "improvement": improvement,
-                    }
-                )
-
-            # Reset model to free memory if not training
-            if not train_mode:
-                self.sts_pipeline.reset_model()
-
-            self._cleanup_memory()
-
-            # Return processing result
-            return ProcessingResult(
-                file_name=file_name,
-                input_en_score=input_en_score,
-                corrected_en_score=corrected_en_score,
-                improvement=improvement,
-                input_transcript=input_result.transcript,
-                corrected_transcript=corrected_result.transcript,
-                input_accents=input_result.accents,
-                corrected_accents=corrected_result.accents,
-                epoch=epoch,
-                loss=-improvement if train_mode else None,
+            # Log to wandb
+            wandb.log(
+                {
+                    "loss": loss.item(),
+                    "file_name": file_name,
+                    "epoch": epoch,
+                    "input_en_score": input_en_score,
+                    "corrected_en_score": corrected_en_score,
+                    "improvement": improvement,
+                }
             )
 
-        except Exception as e:
-            logger.error(f"Error processing {file_name} at epoch {epoch}: {e}")
-            self._cleanup_memory()
+        # Reset model to free memory if not training
+        if not train_mode:
             self.sts_pipeline.reset_model()
-            return None
+
+        self._cleanup_memory()
+
+        # Return processing result
+        return ProcessingResult(
+            file_name=file_name,
+            input_en_score=input_en_score,
+            corrected_en_score=corrected_en_score,
+            improvement=improvement,
+            input_transcript=input_transcript,
+            corrected_transcript=corrected_transcript,
+            input_accents=input_result.accents,
+            corrected_accents=corrected_result.accents,
+            epoch=epoch,
+            loss=-improvement if train_mode else None,
+        )
+
+        # except Exception as e:
+        #     logger.error(f"Error processing {file_name} at epoch {epoch}: {e}")
+        #     self._cleanup_memory()
+        #     self.sts_pipeline.reset_model()
+        #     return None
 
     def train(self) -> TrainingResult:
         """
@@ -296,12 +395,26 @@ class AccentTrainer:
             # Process files in batches
             for i in range(0, len(audio_files), self.config.batch_size):
                 batch_files = audio_files[i : i + self.config.batch_size]
+                batch_num = i // self.config.batch_size + 1
+                total_batches = (len(audio_files) + self.config.batch_size - 1) // self.config.batch_size
 
-                for audio_path in tqdm(batch_files, desc=f"Epoch {epoch + 1}"):
+                logger.info(f"Processing batch {batch_num}/{total_batches}, size: {len(batch_files)}")
+
+                # Track batch level scores
+                batch_input_scores = []
+                batch_corrected_scores = []
+                batch_improvements = []
+
+                for audio_path in tqdm(batch_files, desc=f"Epoch {epoch + 1}, Batch {batch_num}"):
                     process_result = self.process_file(audio_path, epoch, train_mode=True)
 
                     if process_result:
                         epoch_results.append(process_result)
+
+                        # Collect batch statistics
+                        batch_input_scores.append(process_result.input_en_score)
+                        batch_corrected_scores.append(process_result.corrected_en_score)
+                        batch_improvements.append(process_result.improvement)
 
                         # Update file stats
                         file_name = process_result.file_name
@@ -320,6 +433,29 @@ class AccentTrainer:
                         if process_result.corrected_en_score > result.file_stats[file_name]["best_score"]:
                             result.file_stats[file_name]["best_score"] = process_result.corrected_en_score
                             result.file_stats[file_name]["best_epoch"] = epoch
+
+                # Log batch-level statistics if we processed any files
+                if batch_input_scores:
+                    avg_batch_input = np.mean(batch_input_scores)
+                    avg_batch_corrected = np.mean(batch_corrected_scores)
+                    avg_batch_improvement = np.mean(batch_improvements)
+
+                    logger.info(f"  Batch {batch_num} statistics:")
+                    logger.info(f"    Average input English score: {avg_batch_input:.4f}")
+                    logger.info(f"    Average corrected English score: {avg_batch_corrected:.4f}")
+                    logger.info(f"    Average improvement: {avg_batch_improvement:.4f}")
+
+                    # Log batch statistics to wandb
+                    wandb.log(
+                        {
+                            "epoch": epoch,
+                            "batch": batch_num,
+                            "batch_size": len(batch_files),
+                            "batch_input_score": avg_batch_input,
+                            "batch_corrected_score": avg_batch_corrected,
+                            "batch_improvement": avg_batch_improvement,
+                        }
+                    )
 
             # Calculate epoch statistics
             if epoch_results:
