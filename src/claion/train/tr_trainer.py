@@ -198,10 +198,10 @@ class SpeechT5ForSpeechToSpeechTraining(SpeechT5ForSpeechToSpeech):
             output = (hidden_states,)
             return ((loss,) + output) if loss is not None else output
 
-        return dict(
-            loss=loss,
-            last_hidden_state=hidden_states,
-        )
+        return {
+            "loss": loss,
+            "last_hidden_state": hidden_states,
+        }
 
 
 # Custom loss function for accent optimization

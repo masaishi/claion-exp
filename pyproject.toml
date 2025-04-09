@@ -51,7 +51,7 @@ claion = "claion.__main__:main"
 
 [tool.ruff]
 line-length = 160
-exclude = [".venv", "venv", "migrations", "__pycache__", "build", "dist"]
+exclude = [".venv", "venv", "migrations", "__pycache__", "build", "dist", "notebooks/"]
 target-version = "py312"
 
 [tool.ruff.lint]
