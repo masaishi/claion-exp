@@ -74,7 +74,7 @@ omit = ["*/tests/*", "*_test.py"]
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
-pythonVersion = "3.13"
+pythonVersion = "3.12"
 typeCheckingMode = "basic"
 reportMissingImports = true
 reportMissingTypeStubs = false
