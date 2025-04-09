@@ -9,10 +9,10 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 import torchaudio
+import wandb
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-import wandb
 from claion.core.accent_evaluator import AccentEvaluator, EvaluatorConfig
 from claion.data.utils import get_root_path
 from claion.pipes.sb_sts import SpeechBrainSTSPipeline
