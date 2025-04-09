@@ -82,8 +82,8 @@ class TrainingResult:
 
     best_epoch: int
     best_improvement: float
-    file_stats: Dict[str, Dict] = None
-    epoch_stats: List[Dict] = None
+    file_stats: Optional[Dict[str, Dict]] = None
+    epoch_stats: Optional[List[Dict]] = None
 
     def __post_init__(self):
         """Initialize collections if None."""
