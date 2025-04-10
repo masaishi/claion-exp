@@ -68,12 +68,19 @@ class ProcessingResult:
     input_en_score: float
     corrected_en_score: float
     improvement: float
-    input_transcript: str
-    corrected_transcript: str
-    input_accents: Dict[str, float]
-    corrected_accents: Dict[str, float]
-    epoch: int
+    input_transcript: Optional[str] = ""
+    corrected_transcript: Optional[str] = ""
+    input_accents: Optional[Dict[str, float]] = None
+    corrected_accents: Optional[Dict[str, float]] = None
+    epoch: int = 30
     loss: Optional[float] = None
+
+    def __post_init__(self):
+        """Ensure non-None values for dictionary fields."""
+        if self.input_accents is None:
+            self.input_accents = {}
+        if self.corrected_accents is None:
+            self.corrected_accents = {}
 
 
 @dataclass
@@ -87,6 +94,10 @@ class TrainingResult:
 
     def __post_init__(self):
         """Initialize collections if None."""
+        if self.file_stats is None:
+            self.file_stats = {}
+        if self.epoch_stats is None:
+            self.epoch_stats = []
         if self.file_stats is None:
             self.file_stats = {}
         if self.epoch_stats is None:
@@ -609,21 +620,28 @@ def main():
 
     # Print summary
     print("\nTraining Complete!")
-    print(f"Processed {len(results.file_stats)} files over {config.epochs} epochs")
+    # Ensure file_stats is not None before using len()
+    if results.file_stats is not None:
+        print(f"Processed {len(results.file_stats)} files over {config.epochs} epochs")
+    else:
+        print(f"Processed 0 files over {config.epochs} epochs")
     print(f"Best epoch: {results.best_epoch} with improvement: {results.best_improvement:.4f}")
 
-    # Print top improvements
-    improvements = [
-        (file_name, stats["best_score"] - stats.get("original_score", 0))
-        for file_name, stats in results.file_stats.items()
-        if stats.get("original_score") is not None
-    ]
+    # Print top improvements - ensure file_stats is not None
+    improvements = []
+    if results.file_stats is not None:
+        improvements = [
+            (file_name, stats["best_score"] - stats.get("original_score", 0))
+            for file_name, stats in results.file_stats.items()
+            if stats.get("original_score") is not None
+        ]
 
     if improvements:
         improvements.sort(key=lambda x: x[1], reverse=True)
         print("\nTop 5 most improved files:")
         for i, (file_name, improvement) in enumerate(improvements[:5]):
-            stats = results.file_stats[file_name]
+            # Safe access to file_stats since we know it's not None here
+            stats = results.file_stats[file_name] if results.file_stats else {}
             print(f"{i + 1}. {file_name}: {improvement:.4f} improvement ({stats.get('original_score', 0):.4f} → {stats['best_score']:.4f})")
 
 

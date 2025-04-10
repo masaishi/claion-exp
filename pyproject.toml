@@ -31,9 +31,9 @@ dev = [
     "pytest-cov>=6.0.0",
     "pytest>=8.3.4",
     "ruff>=0.9.6",
-    "pyright>1.1.398",
     "invoke>=2.2.0",
     "ipykernel>=6.29.5",
+    "pyright>=1.1.398",
 ]
 notebooks = [
     "ipykernel>=6.29.5",
