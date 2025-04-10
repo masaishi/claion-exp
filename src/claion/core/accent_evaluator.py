@@ -62,9 +62,7 @@ class AccentEvaluator:
             waveform = Resample(orig_freq=sample_rate, new_freq=16000)(waveform)
             sample_rate = 16000
 
-        input_features = self.processor(
-            waveform.squeeze().numpy(), sampling_rate=sample_rate, return_tensors="pt"
-        ).input_features.to(self.device)
+        input_features = self.processor(waveform.squeeze().numpy(), sampling_rate=sample_rate, return_tensors="pt").input_features.to(self.device)
 
         return AudioProcessingResult(waveform=waveform, sample_rate=sample_rate, input_features=input_features)
 
@@ -74,9 +72,7 @@ class AccentEvaluator:
 
     def _get_model_logits(self, input_features: torch.Tensor) -> torch.Tensor:
         """Get model logits from input features."""
-        decoder_input_ids = torch.full((input_features.shape[0], 1), self.TRANSCRIBE_TOKEN_ID, dtype=torch.long).to(
-            self.device
-        )
+        decoder_input_ids = torch.full((input_features.shape[0], 1), self.TRANSCRIBE_TOKEN_ID, dtype=torch.long).to(self.device)
         return self.model(input_features, decoder_input_ids=decoder_input_ids).logits
 
     def get_tokens_probabilities(self, logits: torch.Tensor, token_ids: List[int]) -> TokenProbabilities:
@@ -112,10 +108,7 @@ class AccentEvaluator:
         token_probs = self.get_tokens_probabilities(logits, token_ids)
 
         results = [
-            {
-                token: token_probs.probabilities[input_idx, 0, token_id].item()
-                for token_id, token in zip(token_ids, tokens)
-            }
+            {token: token_probs.probabilities[input_idx, 0, token_id].item() for token_id, token in zip(token_ids, tokens)}
             for input_idx in range(token_probs.logits.shape[0])
         ]
 
@@ -174,9 +167,7 @@ class AccentEvaluator:
             mean_score=mean_score,
         )
 
-    def __call__(
-        self, audio_file_path: str, max_duration: int = 60, transcribe_audio: bool = False
-    ) -> AccentEvaluationResult:
+    def __call__(self, audio_file_path: str, max_duration: int = 60, transcribe_audio: bool = False) -> AccentEvaluationResult:
         """
         Evaluate accent in an audio file.
 

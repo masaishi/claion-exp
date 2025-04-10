@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Masamune Ishihara", email = "mwishiha@ucsc.edu" }]
 dependencies = [
+    "accelerate>=1.5.2",
     "click>=8.1.8",
     "datasets>=3.3.1",
     "iso639-lang>=2.6.0",
@@ -14,12 +15,14 @@ dependencies = [
     "numpy==1.26.4",
     "polars>=1.22.0",
     "pydantic>=2.10.6",
+    "python-dotenv>=1.1.0",
     "rich>=13.9.4",
     "soundfile>=0.12.1",
     "speechbrain>=1.0.2",
     "torch>=2.6.0",
     "torchaudio>=2.6.0",
     "transformers>=4.49.0",
+    "wandb>=0.19.8",
 ]
 
 [dependency-groups]
@@ -28,9 +31,9 @@ dev = [
     "pytest-cov>=6.0.0",
     "pytest>=8.3.4",
     "ruff>=0.9.6",
-    "pyright>=1.1.394",
     "invoke>=2.2.0",
     "ipykernel>=6.29.5",
+    "pyright>=1.1.398",
 ]
 notebooks = [
     "ipykernel>=6.29.5",
@@ -48,12 +51,16 @@ claion = "claion.__main__:main"
 
 [tool.ruff]
 line-length = 160
-exclude = [".venv", "venv", "migrations", "__pycache__", "build", "dist"]
+exclude = [".venv", "venv", "migrations", "__pycache__", "build", "dist", "notebooks/"]
 target-version = "py312"
 
 [tool.ruff.lint]
 select = ["C", "E", "F", "I", "W"]
 fixable = ["ALL"]
+
+[tool.ruff.lint.isort]
+known-third-party = ["numpy", "torch", "torchaudio", "wandb", "tqdm", "dotenv"]
+known-first-party = ["claion"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -67,7 +74,7 @@ omit = ["*/tests/*", "*_test.py"]
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
-pythonVersion = "3.13"
+pythonVersion = "3.12"
 typeCheckingMode = "basic"
 reportMissingImports = true
 reportMissingTypeStubs = false
